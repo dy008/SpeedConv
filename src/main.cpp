@@ -19,19 +19,20 @@ struct Button {
 };
 
 Button button = {18, 0, false};
-
+hw_timer_t * timer = NULL;
 volatile bool FirstFall;
 volatile uint64_t before_time = 0 , duty = 0;
+float freq ;
 
 void IRAM_ATTR Pin_isr() {
   if (!FirstFall)
   {
-    before_time = timerRead(timer);
+    timer = timerBegin(1, 80, true);
     FirstFall = true;
   }
   else
   {
-    duty = timerRead(timer) - before_time;
+    duty = timerRead(timer);
     timerStop(timer);
     FirstFall = false;
     button.pressed = true;
@@ -42,7 +43,7 @@ void IRAM_ATTR Pin_isr() {
 /*************************/
 volatile int interruptCounter;
 int totalInterruptCounter;
-hw_timer_t * timer = NULL;
+
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 void IRAM_ATTR onTimer() {
   portENTER_CRITICAL_ISR(&timerMux);
@@ -62,7 +63,7 @@ void setup() {
 
   timer = timerBegin(1, 80, true);
   timerAttachInterrupt(timer, &onTimer, true);
-  timerAlarmWrite(timer, 1000000, false);
+  timerAlarmWrite(timer, 1000000, true);
   timerAlarmEnable(timer);
 }
 void loop() {
@@ -74,9 +75,15 @@ void loop() {
     Serial.print("An Timer over. Total number: ");
     Serial.println(totalInterruptCounter);
   }
-
+  if (Serial.available())
+  {
+    uint64_t setfreq = Serial.readStringUntil('\n').toInt();
+    ledcWriteTone(LEDC_CHANNEL_0,setfreq);
+  }
+  
     if (button.pressed) {
-        Serial.printf("duty time %u \n", duty);
+       freq = 1000000 / duty ;
+        Serial.printf("duty time %u \n", 1000000/duty);
         button.pressed = false;
     }
 
