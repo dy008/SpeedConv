@@ -7,11 +7,12 @@
 #include <Update.h>
 #include <ESPmDNS.h>
 #define U_PART U_SPIFFS
-#define Ticker_Time   200   //定时周期 ms
+#define Ticker_Time   1000   //定时周期 ms
+#define Default_Freq  0 
 #define LED_PIN            26
 #define PLUSE_PIN          18
 
-#define PCNT_TEST_UNIT      PCNT_UNIT_0
+#define PCNT_TEST_UNIT      PCNT_UNIT_0   //使用计数器0通道
 #define PCNT_H_LIM_VAL      32767
 #define PCNT_L_LIM_VAL     -32767
 #define PCNT_THRESH1_VAL    0
@@ -33,10 +34,9 @@ const char* PARAM_FREQ = "FreqSet";
 
 AsyncWebServer server(80);
 size_t content_len;
-volatile float duty,duty_before ,freq, freq_before, FreqSet;
+float duty,duty_before ,freq, freq_before, FreqSet;
 int16_t pluse_number;
 
-volatile bool TimerON = false;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 volatile SemaphoreHandle_t timerSemaphore;
 volatile uint32_t isrCounter = 0;
@@ -47,7 +47,6 @@ void IRAM_ATTR onTimer(){
   portENTER_CRITICAL_ISR(&timerMux);
   isrCounter++;
   lastIsrAt = millis();
-  TimerON = true;
   portEXIT_CRITICAL_ISR(&timerMux);
   // Give a semaphore that we can check in the loop
   xSemaphoreGiveFromISR(timerSemaphore, NULL);
@@ -216,7 +215,9 @@ void webInit() {
     else if (request->hasParam(PARAM_FREQ)) {
       inputMessage = request->getParam(PARAM_FREQ)->value();
       FreqSet = inputMessage.toInt();
-      ledcWriteTone(1,FreqSet);
+      ledcWriteTone(LEDC_CHANNEL_0,FreqSet);
+      ledcWriteTone(LEDC_CHANNEL_1,FreqSet);
+      writeFile(SPIFFS, "/FreqSet.txt", inputMessage.c_str());
     }
     else {
       inputMessage = "No message sent";
@@ -304,19 +305,18 @@ void setup() {
 
   pinMode(PLUSE_PIN, INPUT_PULLUP);
 
-  // Setup timer and attach timer to a led pin
-  ledcSetup(LEDC_CHANNEL_0, 1, 12);
-  ledcWriteTone(LEDC_CHANNEL_0,5);
-  ledcAttachPin(LED_PIN, LEDC_CHANNEL_0);
-  ledcSetup(1,1,12);
-  ledcWriteTone(1,5);
-  ledcAttachPin(LED_BUILTIN, 1);
-
-
   if(!SPIFFS.begin(true)){
     Serial.println("An Error has occurred while mounting SPIFFS");
     return;
   }
+  FreqSet = readFile(SPIFFS, "/FreqSet.txt").toFloat();
+// Setup timer and attach timer to a led pin
+  ledcSetup(LEDC_CHANNEL_0, Default_Freq, 12);
+  ledcWriteTone(LEDC_CHANNEL_0,FreqSet);
+  ledcAttachPin(LED_PIN, LEDC_CHANNEL_0);
+  ledcSetup(LEDC_CHANNEL_1,Default_Freq,12);
+  ledcWriteTone(LEDC_CHANNEL_1,FreqSet);
+  ledcAttachPin(LED_BUILTIN, LEDC_CHANNEL_1);
 
   //Remove the password parameter, if you want the AP (Access Point) to be open
   WiFi.softAP(ssid);
@@ -347,30 +347,15 @@ void setup() {
   timerAlarmWrite(timer, Ticker_Time * 1000, true);
   // Start an alarm
   timerAlarmEnable(timer);
-  Serial.print("I'm Started... ");
+  Serial.println("I'm Started... ");
 }
 
 void loop() {
-  /*
-  // To access your stored values on inputString, inputInt, inputFloat
-  String yourInputString = readFile(SPIFFS, "/inputString.txt");
-  Serial.print("*** Your inputString: ");
-  Serial.println(yourInputString);
-  
-  int yourInputInt = readFile(SPIFFS, "/inputInt.txt").toInt();
-  Serial.print("*** Your inputInt: ");
-  Serial.println(yourInputInt);
-  
-  float yourInputFloat = readFile(SPIFFS, "/inputFloat.txt").toFloat();
-  Serial.print("*** Your inputFloat: ");
-  Serial.println(yourInputFloat);
-  delay(5000);
-*/
   if (Serial.available())
   {
-    FreqSet = Serial.readStringUntil('\n').toDouble();
+    FreqSet = Serial.readStringUntil('\n').toFloat();
     ledcWriteTone(LEDC_CHANNEL_0,FreqSet);
-    ledcWriteTone(1,FreqSet);
+    ledcWriteTone(LEDC_CHANNEL_1,FreqSet);
   }
 
 if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE){
@@ -379,7 +364,6 @@ if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE){
     portENTER_CRITICAL(&timerMux);
     isrCount = isrCounter;
     isrTime = lastIsrAt;
-    TimerON = false;
     portEXIT_CRITICAL(&timerMux);
 
     if (pcnt_get_counter_value(PCNT_TEST_UNIT,&pluse_number) == ESP_OK)
@@ -388,11 +372,11 @@ if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE){
       pcnt_counter_clear(PCNT_TEST_UNIT);
       pcnt_counter_resume(PCNT_TEST_UNIT);
       freq = pluse_number * (1000/Ticker_Time);
-      duty = 1000000 / Read_Freq_IN(freq,filter_buf_freg);
-      if (duty_before != duty)
+      duty = 1000000 / freq;
+      while (duty_before != duty)
       {
         duty_before = duty;
-        Serial.printf("freq & duty %f : %f \n", freq,duty);
+        Serial.printf("freq & duty %f - %f \n", freq,duty);
       }
     }
   }
