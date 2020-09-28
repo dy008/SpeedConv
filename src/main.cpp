@@ -1,55 +1,79 @@
 #include <Arduino.h>
 #include <ledc.h>
 #include <pcnt.h>
-
 #include <SPIFFS.h>
 #include <ESPAsyncWebServer.h>
 #include <Update.h>
 #include <ESPmDNS.h>
+
 #define U_PART U_SPIFFS
 #define Ticker_Time   1000   //定时周期 ms
 #define Default_Freq  0 
-#define LED_PIN            26
-#define PLUSE_PIN          18
+#define Pluse_TO_ECU    2
+#define Pluse_TO_SpeedMeter   26
 
 #define PCNT_TEST_UNIT      PCNT_UNIT_0   //使用计数器0通道
-#define PCNT_H_LIM_VAL      32767
+#define PCNT_H_LIM_VAL      5
 #define PCNT_L_LIM_VAL     -32767
 #define PCNT_THRESH1_VAL    0
 #define PCNT_THRESH0_VAL   -0
 #define PCNT_INPUT_SIG_IO   18  // Pulse Input GPIO
-#define PCNT_INPUT_CTRL_IO  18  // Control GPIO HIGH=count up, LOW=count down
+
+/* Prepare configuration for the PCNT unit */
+    pcnt_config_t pcnt_config = {
+        // Set PCNT input signal and control GPIOs
+        .pulse_gpio_num = PCNT_INPUT_SIG_IO,
+        .ctrl_gpio_num = PCNT_PIN_NOT_USED ,
+        .lctrl_mode = PCNT_MODE_KEEP, // Reverse counting direction if low
+        .hctrl_mode = PCNT_MODE_KEEP,    // Keep the primary counter mode if high
+        // What to do on the positive / negative edge of pulse input?
+        .pos_mode = PCNT_COUNT_INC,   // Count up on the positive edge
+        .neg_mode = PCNT_COUNT_DIS,   // Keep the counter value on the negative edge
+        // Set the maximum and minimum limit values to watch
+        .counter_h_lim = PCNT_H_LIM_VAL,
+        .counter_l_lim = PCNT_L_LIM_VAL,
+        .unit = PCNT_TEST_UNIT,
+        .channel = PCNT_CHANNEL_0,        
+        // What to do when control input is low or high?       
+    };
 
 hw_timer_t * timer = NULL;
 /* Prepare configuration for the PCNT unit */
-pcnt_config_t pcnt_config;
+pcnt_isr_handle_t user_isr_handle = NULL; //user's ISR service handle
 
 const char* host = "esp32";
 const char* ssid = "ninja400";
 const char* password = "12345678";
-const char* PARAM_STRING = "inputString";
-const char* PARAM_INT = "inputInt";
-const char* PARAM_FLOAT = "inputFloat";
-const char* PARAM_FREQ = "FreqSet";
+const char* PARAM_ECU = "ECU_CV";   // 发往ECU的轮速脉冲系数
+const char* PARAM_SPM = "SPM_CV";   // 发往码表的轮速脉冲系数
+const char* PARAM_ECU_HILIM = "ECU_HILIM";  // 发往ECU的轮数频率高限
 
 AsyncWebServer server(80);
 size_t content_len;
-float duty,duty_before ,freq, freq_before, FreqSet;
-int16_t pluse_number;
+float freq, freq_before, ECU_Speed, SPM_Speed, ECU_CV, SPM_CV,ECU_HILIM;
+int16_t pluse_number;   // Pluse Counter value
+volatile bool Moto_Runing = false;    // Motorcycle is Running
 
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 volatile SemaphoreHandle_t timerSemaphore;
-volatile uint32_t isrCounter = 0;
-volatile uint32_t lastIsrAt = 0;
 
 void IRAM_ATTR onTimer(){
-  // Increment the counter and set the time of ISR
-  portENTER_CRITICAL_ISR(&timerMux);
-  isrCounter++;
-  lastIsrAt = millis();
-  portEXIT_CRITICAL_ISR(&timerMux);
   // Give a semaphore that we can check in the loop
   xSemaphoreGiveFromISR(timerSemaphore, NULL);
+}
+
+void IRAM_ATTR pcnt_intr_handler(void *arg)
+{
+    uint32_t intr_status = PCNT.int_st.val;
+    int i = 0;    
+    for (i = 0; i < PCNT_UNIT_MAX; i++) {
+        if (intr_status & (BIT(i))) {
+            PCNT.int_clr.val = BIT(i);
+            }
+        }
+  portENTER_CRITICAL_ISR(&timerMux);
+  Moto_Runing = true;
+  portEXIT_CRITICAL_ISR(&timerMux);
 }
 // HTML web page to handle 3 input fields (inputString, inputInt, inputFloat)
 const char index_html[] PROGMEM = R"rawliteral(
@@ -64,19 +88,15 @@ const char index_html[] PROGMEM = R"rawliteral(
   </script></head><body>
   </form><br>
   <form action="/get" target="hidden-form">
-    Freq(%Freq% Hz) : Duty(%Duty% uS) : <input type="number " name="FreqSet">
+    ECU Speed Coefficient( %ECU_CV% ): <input type="number " name="ECU_CV">
     <input type="submit" value="Submit" onclick="submitMessage()">
   </form><br>
   <form action="/get" target="hidden-form">
-    inputString (%inputString%): <input type="text" name="inputString">
+    SpeedMeter Speed Coefficient( %SPM_CV% ): <input type="number " name="SPM_CV">
     <input type="submit" value="Submit" onclick="submitMessage()">
   </form><br>
   <form action="/get" target="hidden-form">
-    inputInt (%inputInt%): <input type="number " name="inputInt">
-    <input type="submit" value="Submit" onclick="submitMessage()">
-  </form><br>
-  <form action="/get" target="hidden-form">
-    inputFloat (%inputFloat%): <input type="number " name="inputFloat">
+    ECU HighSpeed Limited( %ECU_HILIM% ): <input type="number " name="ECU_HILIM">
     <input type="submit" value="Submit" onclick="submitMessage()">
   </form><br>
   </form><br>
@@ -118,24 +138,15 @@ void writeFile(fs::FS &fs, const char * path, const char * message){
 String processor(const String& var){
   //Serial.println(var);
   char outstr[15];
-  if(var == "inputString"){
-    return readFile(SPIFFS, "/inputString.txt");
+  if(var == "ECU_CV"){
+    return readFile(SPIFFS, "/ECU_CV.txt");
   }
-  else if(var == "inputInt"){
-    return readFile(SPIFFS, "/inputInt.txt");
+  else if(var == "SPM_CV"){
+    return readFile(SPIFFS, "/SPM_CV.txt");
   }
-  else if(var == "inputFloat"){
-    return readFile(SPIFFS, "/inputFloat.txt");
-  }else if (var == "Freq")
-  {
-    dtostrf(freq,10,0,outstr);
-    return outstr;
-  }else if (var == "Duty")
-  {
-    dtostrf(duty,11,1,outstr);
-    return outstr;
-  }
-  
+  else if(var == "ECU_HILIM"){
+    return readFile(SPIFFS, "/ECU_HILIM.txt");
+  }  
   return String();
 }
 
@@ -198,26 +209,19 @@ void webInit() {
   server.on("/get", HTTP_GET, [] (AsyncWebServerRequest *request) {
     String inputMessage;
     // GET inputString value on <ESP_IP>/get?inputString=<inputMessage>
-    if (request->hasParam(PARAM_STRING)) {
-      inputMessage = request->getParam(PARAM_STRING)->value();
-      writeFile(SPIFFS, "/inputString.txt", inputMessage.c_str());
+    if (request->hasParam(PARAM_ECU)) {
+      inputMessage = request->getParam(PARAM_ECU)->value();
+      writeFile(SPIFFS, "/ECU_CV.txt", inputMessage.c_str());
     }
     // GET inputInt value on <ESP_IP>/get?inputInt=<inputMessage>
-    else if (request->hasParam(PARAM_INT)) {
-      inputMessage = request->getParam(PARAM_INT)->value();
-      writeFile(SPIFFS, "/inputInt.txt", inputMessage.c_str());
+    else if (request->hasParam(PARAM_SPM)) {
+      inputMessage = request->getParam(PARAM_SPM)->value();
+      writeFile(SPIFFS, "/SPM_CV.txt", inputMessage.c_str());
     }
     // GET inputFloat value on <ESP_IP>/get?inputFloat=<inputMessage>
-    else if (request->hasParam(PARAM_FLOAT)) {
-      inputMessage = request->getParam(PARAM_FLOAT)->value();
-      writeFile(SPIFFS, "/inputFloat.txt", inputMessage.c_str());
-    }
-    else if (request->hasParam(PARAM_FREQ)) {
-      inputMessage = request->getParam(PARAM_FREQ)->value();
-      FreqSet = inputMessage.toInt();
-      ledcWriteTone(LEDC_CHANNEL_0,FreqSet);
-      ledcWriteTone(LEDC_CHANNEL_1,FreqSet);
-      writeFile(SPIFFS, "/FreqSet.txt", inputMessage.c_str());
+    else if (request->hasParam(PARAM_ECU_HILIM)) {
+      inputMessage = request->getParam(PARAM_ECU_HILIM)->value();
+      writeFile(SPIFFS, "/ECU_HILIM.txt", inputMessage.c_str());
     }
     else {
       inputMessage = "No message sent";
@@ -237,23 +241,6 @@ void webInit() {
  */
 static void pcnt_init(void)
 {
-    /* Prepare configuration for the PCNT unit */
-    pcnt_config_t pcnt_config = {
-        // Set PCNT input signal and control GPIOs
-        .pulse_gpio_num = PCNT_INPUT_SIG_IO,
-        .ctrl_gpio_num = PCNT_PIN_NOT_USED ,
-        .lctrl_mode = PCNT_MODE_KEEP, // Reverse counting direction if low
-        .hctrl_mode = PCNT_MODE_KEEP,    // Keep the primary counter mode if high
-        // What to do on the positive / negative edge of pulse input?
-        .pos_mode = PCNT_COUNT_INC,   // Count up on the positive edge
-        .neg_mode = PCNT_COUNT_DIS,   // Keep the counter value on the negative edge
-        // Set the maximum and minimum limit values to watch
-        .counter_h_lim = PCNT_H_LIM_VAL,
-        .counter_l_lim = PCNT_L_LIM_VAL,
-        .unit = PCNT_TEST_UNIT,
-        .channel = PCNT_CHANNEL_0,        
-        // What to do when control input is low or high?       
-    };
     /* Initialize PCNT unit */
     pcnt_unit_config(&pcnt_config);
 
@@ -268,7 +255,7 @@ static void pcnt_init(void)
     //pcnt_event_enable(PCNT_TEST_UNIT, PCNT_EVT_THRES_0);
     /* Enable events on zero, maximum and minimum limit values */
     //pcnt_event_enable(PCNT_TEST_UNIT, PCNT_EVT_ZERO);
-    //pcnt_event_enable(PCNT_TEST_UNIT, PCNT_EVT_H_LIM);
+    pcnt_event_enable(PCNT_TEST_UNIT, PCNT_EVT_H_LIM);
     //pcnt_event_enable(PCNT_TEST_UNIT, PCNT_EVT_L_LIM);
 
     /* Initialize PCNT's counter */
@@ -276,47 +263,35 @@ static void pcnt_init(void)
     pcnt_counter_clear(PCNT_TEST_UNIT);
 
     /* Register ISR handler and enable interrupts for PCNT unit */
-    //pcnt_isr_register(pcnt_example_intr_handler, NULL, 0, &user_isr_handle);
-    //pcnt_intr_enable(PCNT_TEST_UNIT);
+    pcnt_isr_register(pcnt_intr_handler, NULL, 0, &user_isr_handle);
+    pcnt_intr_enable(PCNT_TEST_UNIT);
 
     /* Everything is set up, now go to counting */
     pcnt_counter_resume(PCNT_TEST_UNIT);
 }
 
 
-#define FILTER_N 4  // 递推平均滤波法（又称滑动平均滤波法）计算次数
-
-float filter_buf_freg[FILTER_N + 1];
-
-float Read_Freq_IN(float in,float filter_buf[FILTER_N]){    // 递推平均值AD转换算法 返回电压值
-  int i;
-  uint64_t filter_sum = 0;
-  filter_buf[FILTER_N] = in;
-  for(i = 0; i < FILTER_N; i++) {
-    filter_buf[i] = filter_buf[i + 1]; // 所有数据左移，低位仍掉
-    filter_sum += filter_buf[i];
-  }
-  return ((filter_sum / FILTER_N));
-}
-
-
 void setup() {
   Serial.begin(115200);
+  Serial.setTimeout(3000);
 
-  pinMode(PLUSE_PIN, INPUT_PULLUP);
+  pinMode(PCNT_INPUT_SIG_IO, INPUT_PULLUP);
 
   if(!SPIFFS.begin(true)){
     Serial.println("An Error has occurred while mounting SPIFFS");
     return;
   }
-  FreqSet = readFile(SPIFFS, "/FreqSet.txt").toFloat();
+  ECU_CV = readFile(SPIFFS, "/ECU_CV.txt").toFloat();
+  SPM_CV = readFile(SPIFFS, "/SPM_CV.txt").toFloat();
+  ECU_HILIM = readFile(SPIFFS, "/ECU_HILIM.txt").toFloat();
+
 // Setup timer and attach timer to a led pin
-  ledcSetup(LEDC_CHANNEL_0, Default_Freq, 12);
-  ledcWriteTone(LEDC_CHANNEL_0,FreqSet);
-  ledcAttachPin(LED_PIN, LEDC_CHANNEL_0);
-  ledcSetup(LEDC_CHANNEL_1,Default_Freq,12);
-  ledcWriteTone(LEDC_CHANNEL_1,FreqSet);
-  ledcAttachPin(LED_BUILTIN, LEDC_CHANNEL_1);
+  ledcSetup(LEDC_CHANNEL_0, Default_Freq, 12);    // Initial OUT TO Engine Pin
+  ledcWriteTone(LEDC_CHANNEL_0,Default_Freq);
+  ledcAttachPin(Pluse_TO_ECU , LEDC_CHANNEL_0);
+  ledcSetup(LEDC_CHANNEL_1,Default_Freq,12);    // Initial OUT TO SpeedMeter Pin
+  ledcWriteTone(LEDC_CHANNEL_1,Default_Freq);
+  ledcAttachPin(Pluse_TO_SpeedMeter, LEDC_CHANNEL_1);
 
   //Remove the password parameter, if you want the AP (Access Point) to be open
   WiFi.softAP(ssid);
@@ -346,39 +321,44 @@ void setup() {
   // Repeat the alarm (third parameter)
   timerAlarmWrite(timer, Ticker_Time * 1000, true);
   // Start an alarm
-  timerAlarmEnable(timer);
+  // timerAlarmEnable(timer);
   Serial.println("I'm Started... ");
 }
 
 void loop() {
-  if (Serial.available())
+  if (Moto_Runing)
   {
-    FreqSet = Serial.readStringUntil('\n').toFloat();
-    ledcWriteTone(LEDC_CHANNEL_0,FreqSet);
-    ledcWriteTone(LEDC_CHANNEL_1,FreqSet);
+    pcnt_counter_pause(PCNT_TEST_UNIT);
+    pcnt_counter_clear(PCNT_TEST_UNIT);
+    pcnt_intr_disable(PCNT_TEST_UNIT);
+    pcnt_event_disable(PCNT_TEST_UNIT, PCNT_EVT_H_LIM);
+    pcnt_config.counter_h_lim = 32767;
+    pcnt_unit_config(&pcnt_config);
+    pcnt_counter_resume(PCNT_TEST_UNIT);
+           
+    timerAlarmEnable(timer);        // Start Calc Motorcycle Speed
+    WiFi.mode(WIFI_OFF);
+    btStop();
+    Serial.printf("ESP32 Radio Shutdown... \n");
+    portENTER_CRITICAL_ISR(&timerMux);
+    Moto_Runing = false;
+    portEXIT_CRITICAL_ISR(&timerMux);
   }
 
 if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE){
-    uint32_t isrCount = 0, isrTime = 0;
-    // Read the interrupt count and time
-    portENTER_CRITICAL(&timerMux);
-    isrCount = isrCounter;
-    isrTime = lastIsrAt;
-    portEXIT_CRITICAL(&timerMux);
-
     if (pcnt_get_counter_value(PCNT_TEST_UNIT,&pluse_number) == ESP_OK)
     {
       pcnt_counter_pause(PCNT_TEST_UNIT);
       pcnt_counter_clear(PCNT_TEST_UNIT);
       pcnt_counter_resume(PCNT_TEST_UNIT);
       freq = pluse_number * (1000/Ticker_Time);
-      duty = 1000000 / freq;
-      while (duty_before != duty)
+      ECU_Speed = freq * ECU_CV;
+      SPM_Speed = freq * SPM_CV;
+      if (freq_before != freq)
       {
-        duty_before = duty;
-        Serial.printf("freq & duty %f - %f \n", freq,duty);
+        freq_before = freq;
+        Serial.printf("freq & ECU_Speed & SPM_Speed %f4.1 %f4.1 %f4.1 \n", freq,ECU_Speed,SPM_Speed);
       }
     }
   }
-
 }
