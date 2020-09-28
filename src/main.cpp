@@ -137,7 +137,6 @@ void writeFile(fs::FS &fs, const char * path, const char * message){
 // Replaces placeholder with stored values
 String processor(const String& var){
   //Serial.println(var);
-  char outstr[15];
   if(var == "ECU_CV"){
     return readFile(SPIFFS, "/ECU_CV.txt");
   }
@@ -357,7 +356,7 @@ if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE){
       if (freq_before != freq)
       {
         freq_before = freq;
-        Serial.printf("freq & ECU_Speed & SPM_Speed %f4.1 %f4.1 %f4.1 \n", freq,ECU_Speed,SPM_Speed);
+        Serial.printf("freq & ECU_Speed & SPM_Speed %.1f %.1f1 %.1f \n", freq,ECU_Speed,SPM_Speed);
       }
     }
   }
