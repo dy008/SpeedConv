@@ -7,17 +7,21 @@
 #include <ESPmDNS.h>
 
 #define U_PART U_SPIFFS
-#define Ticker_Time   1000   //定时周期 ms
+#define Ticker_Time   250   //定时周期 ms
 #define Default_Freq  0 
-#define Pluse_TO_ECU    2
+#define Pluse_TO_ECU    19
 #define Pluse_TO_SpeedMeter   26
+#define Pluse_UPLIM   2000    // The Speed maybe over 270Km/h???
 
 #define PCNT_TEST_UNIT      PCNT_UNIT_0   //使用计数器0通道
-#define PCNT_H_LIM_VAL      5
+#define PCNT_H_LIM_VAL      10
 #define PCNT_L_LIM_VAL     -32767
 #define PCNT_THRESH1_VAL    0
 #define PCNT_THRESH0_VAL   -0
 #define PCNT_INPUT_SIG_IO   18  // Pulse Input GPIO
+
+#define ECU_LEDC_CHANNEL  LEDC_CHANNEL_0
+#define SPM_LEDC_CHANNEL  LEDC_CHANNEL_2
 
 /* Prepare configuration for the PCNT unit */
     pcnt_config_t pcnt_config = {
@@ -46,7 +50,8 @@ const char* ssid = "ninja400";
 const char* password = "12345678";
 const char* PARAM_ECU = "ECU_CV";   // 发往ECU的轮速脉冲系数
 const char* PARAM_SPM = "SPM_CV";   // 发往码表的轮速脉冲系数
-const char* PARAM_ECU_HILIM = "ECU_HILIM";  // 发往ECU的轮数频率高限
+/* 445Hz = 60KM/h  即1km/h = 7.42个脉冲 */
+const char* PARAM_ECU_HILIM = "ECU_HILIM";  // 发往ECU的轮速频率高限即国版ECU限速值 132km/h = 979Hz
 
 AsyncWebServer server(80);
 size_t content_len;
@@ -211,16 +216,19 @@ void webInit() {
     if (request->hasParam(PARAM_ECU)) {
       inputMessage = request->getParam(PARAM_ECU)->value();
       writeFile(SPIFFS, "/ECU_CV.txt", inputMessage.c_str());
+      ECU_CV = inputMessage.toFloat();
     }
     // GET inputInt value on <ESP_IP>/get?inputInt=<inputMessage>
     else if (request->hasParam(PARAM_SPM)) {
       inputMessage = request->getParam(PARAM_SPM)->value();
       writeFile(SPIFFS, "/SPM_CV.txt", inputMessage.c_str());
+      SPM_CV = inputMessage.toFloat();
     }
     // GET inputFloat value on <ESP_IP>/get?inputFloat=<inputMessage>
     else if (request->hasParam(PARAM_ECU_HILIM)) {
       inputMessage = request->getParam(PARAM_ECU_HILIM)->value();
       writeFile(SPIFFS, "/ECU_HILIM.txt", inputMessage.c_str());
+      ECU_HILIM = inputMessage.toFloat();
     }
     else {
       inputMessage = "No message sent";
@@ -285,12 +293,12 @@ void setup() {
   ECU_HILIM = readFile(SPIFFS, "/ECU_HILIM.txt").toFloat();
 
 // Setup timer and attach timer to a led pin
-  ledcSetup(LEDC_CHANNEL_0, Default_Freq, 12);    // Initial OUT TO Engine Pin
-  ledcWriteTone(LEDC_CHANNEL_0,Default_Freq);
-  ledcAttachPin(Pluse_TO_ECU , LEDC_CHANNEL_0);
-  ledcSetup(LEDC_CHANNEL_1,Default_Freq,12);    // Initial OUT TO SpeedMeter Pin
-  ledcWriteTone(LEDC_CHANNEL_1,Default_Freq);
-  ledcAttachPin(Pluse_TO_SpeedMeter, LEDC_CHANNEL_1);
+  ledcSetup(ECU_LEDC_CHANNEL, Default_Freq, 12);    // Initial OUT TO Engine Pin
+  ledcWriteTone(ECU_LEDC_CHANNEL,Default_Freq);
+  ledcAttachPin(Pluse_TO_ECU , ECU_LEDC_CHANNEL);
+  ledcSetup(SPM_LEDC_CHANNEL,Default_Freq,12);    // Initial OUT TO SpeedMeter Pin
+  ledcWriteTone(SPM_LEDC_CHANNEL,Default_Freq);
+  ledcAttachPin(Pluse_TO_SpeedMeter, SPM_LEDC_CHANNEL);
 
   //Remove the password parameter, if you want the AP (Access Point) to be open
   WiFi.softAP(ssid);
@@ -351,8 +359,20 @@ if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE){
       pcnt_counter_clear(PCNT_TEST_UNIT);
       pcnt_counter_resume(PCNT_TEST_UNIT);
       freq = pluse_number * (1000/Ticker_Time);
+      if (freq >= Pluse_UPLIM)
+      {         // Over Speed Limited
+        freq = 2000;
+      }      
       ECU_Speed = freq * ECU_CV;
       SPM_Speed = freq * SPM_CV;
+      if (ECU_Speed > ECU_HILIM )
+      {         // Over ECU Speed Limited ToDO
+        ECU_Speed = ECU_HILIM;
+      }
+      // Output Speed Pluse...
+      ledcWriteTone(ECU_LEDC_CHANNEL,ECU_Speed);
+      ledcWriteTone(SPM_LEDC_CHANNEL,SPM_Speed);
+      
       if (freq_before != freq)
       {
         freq_before = freq;
