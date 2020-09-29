@@ -101,7 +101,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     <input type="submit" value="Submit" onclick="submitMessage()">
   </form><br>
   <form action="/get" target="hidden-form">
-    ECU HighSpeed Limited( %ECU_HILIM% ): <input type="number " name="ECU_HILIM">
+    ECU Speed Limited( %ECU_HILIM% km/h): <input type="number " name="ECU_HILIM">
     <input type="submit" value="Submit" onclick="submitMessage()">
   </form><br>
   </form><br>
@@ -228,7 +228,7 @@ void webInit() {
     else if (request->hasParam(PARAM_ECU_HILIM)) {
       inputMessage = request->getParam(PARAM_ECU_HILIM)->value();
       writeFile(SPIFFS, "/ECU_HILIM.txt", inputMessage.c_str());
-      ECU_HILIM = inputMessage.toFloat();
+      ECU_HILIM = inputMessage.toFloat() * 7.42;
     }
     else {
       inputMessage = "No message sent";
@@ -290,7 +290,7 @@ void setup() {
   }
   ECU_CV = readFile(SPIFFS, "/ECU_CV.txt").toFloat();
   SPM_CV = readFile(SPIFFS, "/SPM_CV.txt").toFloat();
-  ECU_HILIM = readFile(SPIFFS, "/ECU_HILIM.txt").toFloat();
+  ECU_HILIM = readFile(SPIFFS, "/ECU_HILIM.txt").toFloat()  * 7.42;
 
 // Setup timer and attach timer to a led pin
   ledcSetup(ECU_LEDC_CHANNEL, Default_Freq, 12);    // Initial OUT TO Engine Pin
@@ -376,7 +376,7 @@ if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE){
       if (freq_before != freq)
       {
         freq_before = freq;
-        Serial.printf("freq & ECU_Speed & SPM_Speed %.1f %.1f1 %.1f \n", freq,ECU_Speed,SPM_Speed);
+        Serial.printf("freq & ECU & SPM & HiLim %.1f %.1f1 %.1f %.1f \n", freq,ECU_Speed,SPM_Speed,ECU_HILIM);
       }
     }
   }
