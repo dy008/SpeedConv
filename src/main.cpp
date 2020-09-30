@@ -12,10 +12,11 @@
 #define Pluse_TO_ECU    19
 #define Pluse_TO_SpeedMeter   26
 #define Pluse_UPLIM   2000    // The Speed maybe over 270Km/h???
+#define Pluse_Per_km  7.42    // Pluse number at /km
 
 #define PCNT_TEST_UNIT      PCNT_UNIT_0   //使用计数器0通道
 #define PCNT_H_LIM_VAL      10
-#define PCNT_L_LIM_VAL     -32767
+#define PCNT_L_LIM_VAL      -0
 #define PCNT_THRESH1_VAL    0
 #define PCNT_THRESH0_VAL   -0
 #define PCNT_INPUT_SIG_IO   18  // Pulse Input GPIO
@@ -24,22 +25,22 @@
 #define SPM_LEDC_CHANNEL  LEDC_CHANNEL_2
 
 /* Prepare configuration for the PCNT unit */
-    pcnt_config_t pcnt_config = {
-        // Set PCNT input signal and control GPIOs
-        .pulse_gpio_num = PCNT_INPUT_SIG_IO,
-        .ctrl_gpio_num = PCNT_PIN_NOT_USED ,
-        .lctrl_mode = PCNT_MODE_KEEP, // Reverse counting direction if low
-        .hctrl_mode = PCNT_MODE_KEEP,    // Keep the primary counter mode if high
-        // What to do on the positive / negative edge of pulse input?
-        .pos_mode = PCNT_COUNT_INC,   // Count up on the positive edge
-        .neg_mode = PCNT_COUNT_DIS,   // Keep the counter value on the negative edge
-        // Set the maximum and minimum limit values to watch
-        .counter_h_lim = PCNT_H_LIM_VAL,
-        .counter_l_lim = PCNT_L_LIM_VAL,
-        .unit = PCNT_TEST_UNIT,
-        .channel = PCNT_CHANNEL_0,        
-        // What to do when control input is low or high?       
-    };
+pcnt_config_t pcnt_config = {
+// Set PCNT input signal and control GPIOs
+  .pulse_gpio_num = PCNT_INPUT_SIG_IO,
+  .ctrl_gpio_num = PCNT_PIN_NOT_USED ,
+  .lctrl_mode = PCNT_MODE_KEEP, // Reverse counting direction if low
+  .hctrl_mode = PCNT_MODE_KEEP,    // Keep the primary counter mode if high
+  // What to do on the positive / negative edge of pulse input?
+  .pos_mode = PCNT_COUNT_INC,   // Count up on the positive edge
+  .neg_mode = PCNT_COUNT_DIS,   // Keep the counter value on the negative edge
+  // Set the maximum and minimum limit values to watch
+  .counter_h_lim = PCNT_H_LIM_VAL,
+  .counter_l_lim = PCNT_L_LIM_VAL,
+  .unit = PCNT_TEST_UNIT,
+  .channel = PCNT_CHANNEL_0,        
+  // What to do when control input is low or high?       
+};
 
 hw_timer_t * timer = NULL;
 /* Prepare configuration for the PCNT unit */
@@ -57,7 +58,7 @@ AsyncWebServer server(80);
 size_t content_len;
 float freq, freq_before, ECU_Speed, SPM_Speed, ECU_CV, SPM_CV,ECU_HILIM;
 int16_t pluse_number;   // Pluse Counter value
-volatile bool Moto_Runing = false;    // Motorcycle is Running
+volatile uint16_t run_mode = 0 ;     // run mode as 0=STOP,1=motor start,2=runing
 
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 volatile SemaphoreHandle_t timerSemaphore;
@@ -77,7 +78,7 @@ void IRAM_ATTR pcnt_intr_handler(void *arg)
             }
         }
   portENTER_CRITICAL_ISR(&timerMux);
-  Moto_Runing = true;
+  run_mode = 1;   // motor start
   portEXIT_CRITICAL_ISR(&timerMux);
 }
 // HTML web page to handle 3 input fields (inputString, inputInt, inputFloat)
@@ -228,7 +229,7 @@ void webInit() {
     else if (request->hasParam(PARAM_ECU_HILIM)) {
       inputMessage = request->getParam(PARAM_ECU_HILIM)->value();
       writeFile(SPIFFS, "/ECU_HILIM.txt", inputMessage.c_str());
-      ECU_HILIM = inputMessage.toFloat() * 7.42;
+      ECU_HILIM = inputMessage.toFloat() * Pluse_Per_km;
     }
     else {
       inputMessage = "No message sent";
@@ -277,6 +278,23 @@ static void pcnt_init(void)
     pcnt_counter_resume(PCNT_TEST_UNIT);
 }
 
+void start_run(void){   // motor start run
+  pcnt_counter_pause(PCNT_TEST_UNIT);
+  pcnt_counter_clear(PCNT_TEST_UNIT);
+  pcnt_intr_disable(PCNT_TEST_UNIT);
+  pcnt_event_disable(PCNT_TEST_UNIT, PCNT_EVT_H_LIM);
+  pcnt_config.counter_h_lim = 32767;
+  pcnt_unit_config(&pcnt_config);
+  pcnt_counter_resume(PCNT_TEST_UNIT);
+           
+  timerAlarmEnable(timer);        // Start Calc Motorcycle Speed
+  WiFi.mode(WIFI_OFF);
+  btStop();
+  Serial.printf("ESP32 Radio Shutdown... \n");
+  portENTER_CRITICAL_ISR(&timerMux);
+  run_mode = 2;   // motor is runing
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
 
 void setup() {
   Serial.begin(115200);
@@ -290,7 +308,7 @@ void setup() {
   }
   ECU_CV = readFile(SPIFFS, "/ECU_CV.txt").toFloat();
   SPM_CV = readFile(SPIFFS, "/SPM_CV.txt").toFloat();
-  ECU_HILIM = readFile(SPIFFS, "/ECU_HILIM.txt").toFloat()  * 7.42;
+  ECU_HILIM = readFile(SPIFFS, "/ECU_HILIM.txt").toFloat()  * Pluse_Per_km;
 
 // Setup timer and attach timer to a led pin
   ledcSetup(ECU_LEDC_CHANNEL, Default_Freq, 12);    // Initial OUT TO Engine Pin
@@ -321,7 +339,7 @@ void setup() {
   // Use 1st timer of 4 (counted from zero).
   // Set 80 divider for prescaler (see ESP32 Technical Reference Manual for more
   // info).
-  timer = timerBegin(0, 80, true);
+  timer = timerBegin(1, 80, true);
   // Attach onTimer function to our timer.
   timerAttachInterrupt(timer, &onTimer, true);
   // Set alarm to call onTimer function every second (value in microseconds).
@@ -333,26 +351,13 @@ void setup() {
 }
 
 void loop() {
-  if (Moto_Runing)
+  switch (run_mode)
   {
-    pcnt_counter_pause(PCNT_TEST_UNIT);
-    pcnt_counter_clear(PCNT_TEST_UNIT);
-    pcnt_intr_disable(PCNT_TEST_UNIT);
-    pcnt_event_disable(PCNT_TEST_UNIT, PCNT_EVT_H_LIM);
-    pcnt_config.counter_h_lim = 32767;
-    pcnt_unit_config(&pcnt_config);
-    pcnt_counter_resume(PCNT_TEST_UNIT);
-           
-    timerAlarmEnable(timer);        // Start Calc Motorcycle Speed
-    WiFi.mode(WIFI_OFF);
-    btStop();
-    Serial.printf("ESP32 Radio Shutdown... \n");
-    portENTER_CRITICAL_ISR(&timerMux);
-    Moto_Runing = false;
-    portEXIT_CRITICAL_ISR(&timerMux);
-  }
-
-if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE){
+  case 0:
+    break;
+  case 1: start_run();
+    break;
+  case 2: if (xSemaphoreTake(timerSemaphore, portMAX_DELAY) == pdTRUE){
     if (pcnt_get_counter_value(PCNT_TEST_UNIT,&pluse_number) == ESP_OK)
     {
       pcnt_counter_pause(PCNT_TEST_UNIT);
@@ -376,8 +381,15 @@ if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE){
       if (freq_before != freq)
       {
         freq_before = freq;
-        Serial.printf("freq & ECU & SPM & HiLim %.1f %.1f1 %.1f %.1f \n", freq,ECU_Speed,SPM_Speed,ECU_HILIM);
+        Serial.println("freq & ECU & SPM & HiLim");
+        Serial.printf("%.1f %.1f1 %.1f %.1f \n", freq,ECU_Speed,SPM_Speed,ECU_HILIM);
       }
     }
   }
+    break;
+
+  default:
+    break;
+  }   // end switch (run_mode)
+
 }
