@@ -310,12 +310,12 @@ void setup() {
   SPM_CV = readFile(SPIFFS, "/SPM_CV.txt").toFloat();
   ECU_HILIM = readFile(SPIFFS, "/ECU_HILIM.txt").toFloat()  * Pluse_Per_km;
 
-// Setup timer and attach timer to a led pin
-  ledcSetup(ECU_LEDC_CHANNEL, Default_Freq, 12);    // Initial OUT TO Engine Pin
-  ledcWriteTone(ECU_LEDC_CHANNEL,Default_Freq);
+// Setup timer and attach timer to a led pin, resolution 10 =0~1023 by duty 
+  ledcSetup(ECU_LEDC_CHANNEL, Default_Freq, 10);    // Initial OUT TO Engine Pin
+  ledcWrite(ECU_LEDC_CHANNEL,512);      // 50% duty
   ledcAttachPin(Pluse_TO_ECU , ECU_LEDC_CHANNEL);
-  ledcSetup(SPM_LEDC_CHANNEL,Default_Freq,12);    // Initial OUT TO SpeedMeter Pin
-  ledcWriteTone(SPM_LEDC_CHANNEL,Default_Freq);
+  ledcSetup(SPM_LEDC_CHANNEL,Default_Freq,10);    // Initial OUT TO SpeedMeter Pin
+  ledcWrite(SPM_LEDC_CHANNEL,512);
   ledcAttachPin(Pluse_TO_SpeedMeter, SPM_LEDC_CHANNEL);
 
   //Remove the password parameter, if you want the AP (Access Point) to be open
