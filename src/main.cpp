@@ -94,11 +94,11 @@ const char index_html[] PROGMEM = R"rawliteral(
   </script></head><body>
   </form><br>
   <form action="/get" target="hidden-form">
-    ECU Speed Coefficient( %ECU_CV% ): <input type="number " name="ECU_CV">
+    ECU SpeedCV( %ECU_CV% ): <input type="number " name="ECU_CV">
     <input type="submit" value="Submit" onclick="submitMessage()">
   </form><br>
   <form action="/get" target="hidden-form">
-    SpeedMeter Speed Coefficient( %SPM_CV% ): <input type="number " name="SPM_CV">
+    Meter SpeedCV( %SPM_CV% ): <input type="number " name="SPM_CV">
     <input type="submit" value="Submit" onclick="submitMessage()">
   </form><br>
   <form action="/get" target="hidden-form">
@@ -301,6 +301,7 @@ void setup() {
   Serial.setTimeout(3000);
 
   pinMode(PCNT_INPUT_SIG_IO, INPUT_PULLUP);
+  pinMode(LED_BUILTIN, OUTPUT);
 
   if(!SPIFFS.begin(true)){
     Serial.println("An Error has occurred while mounting SPIFFS");
@@ -377,7 +378,7 @@ void loop() {
       // Output Speed Pluse...
       ledcWriteTone(ECU_LEDC_CHANNEL,ECU_Speed);
       ledcWriteTone(SPM_LEDC_CHANNEL,SPM_Speed);
-      
+      digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
       if (freq_before != freq)
       {
         freq_before = freq;
